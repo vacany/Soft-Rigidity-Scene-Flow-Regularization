@@ -5,7 +5,7 @@
 <!-- ![alt text](paper/exp_results/NP-vs-RNPv1.0.png) -->
 
 # Results on StereoKITTI dataset
-![alt text](paper/performance_v2.png)
+![alt text](imgs/performance_v2.png)
 
 # Installation
 - All modules are on RCI
