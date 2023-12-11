@@ -11,17 +11,17 @@
 
 
 # Installation
-- All modules are on RCI
 - Install [Fast Geodis](https://github.com/masadcv/FastGeodis) with pip install FastGeodis --no-build-isolation
 - Install [PyTorch3d](https://github.com/facebookresearch/pytorch3d) with CUDA support.
 - Install [PyTorch Scatter](https://github.com/rusty1s/pytorch_scatter/tree/master) with CUDA support.
+- Run commands in **install.sh** for installation of the packages above
 
 # DATA
 - Setup directory for extracting the data, visuals and experimental results
 '''console
 BASE_PATH='path_where_to_store_data'
 '''
-- Download [Data](https://login.rci.cvut.cz/data/lidar_intensity/sceneflow/data_sceneflow.tgz) and unpack it to the folder $BASE_PATH/
+- Download [Data](https://login.rci.cvut.cz/data/lidar_intensity/sceneflow/data_sceneflow.tgz) and unpack it to the folder **$BASE_PATH/data/sceneflow**:
 
 ```console
 tar -xvf data_sceneflow.tgz $BASE_PATH/data/sceneflow
