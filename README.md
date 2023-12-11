@@ -43,8 +43,16 @@ where the argument sets the specific datasets according to the following table:
 
 # Experimental results
 
-![image alt ><](docs/table_lidar.png)
-![alt text](docs/table_kitti.png)
+<!-- <img style="float: ;" src="docs/table_lidar.png"> -->
+
+<p align="center">
+  <img src="docs/table_lidar.png" />
+</p>
+
+
+<p align="center">
+  <img src="docs/table_kitti.png" />
+</p>
 
 # Qualitative Example
 ![alt text](docs/qualitative.png)
