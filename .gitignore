@@ -159,12 +159,8 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 .idea/
 
-scripts/connect_jupyter_server.sh
-paper/other_papers
-paper/motion_prior_paper
-data/PATHS.py
 
-*.png
+# *.png
 *.mp4
 *.npy
 *.npz
