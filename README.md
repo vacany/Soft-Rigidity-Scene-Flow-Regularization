@@ -43,7 +43,7 @@ where the argument sets the specific datasets according to the following table:
 
 # Experimental results
 
-![alt text](docs/table_lidar.png)
+![image alt ><](docs/table_lidar.png)
 ![alt text](docs/table_kitti.png)
 
 # Qualitative Example
