@@ -18,9 +18,9 @@
 
 # DATA
 - Setup directory for extracting the data, visuals and experimental results
-'''console
+```console
 BASE_PATH='path_where_to_store_data'
-'''
+```
 - Download [Data](https://login.rci.cvut.cz/data/lidar_intensity/sceneflow/data_sceneflow.tgz) and unpack it to the folder **$BASE_PATH/data/sceneflow**:
 
 ```console
