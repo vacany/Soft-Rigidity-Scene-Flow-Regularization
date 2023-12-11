@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from data.dataloader import SFDataset4D, NSF_dataset
-from models.RSNF import RigidNeuralPrior, NeuralPrior
+from models.neuralpriors import RigidNeuralPrior, NeuralPrior
 from loss.flow import *
 from ops.metric import SceneFlowMetric
 from vis.deprecated_vis import imshow, visualize_flow3d
@@ -18,7 +18,7 @@ from benchmark.exp_config import exp_list
 # import builtins
 # from IPython.lib import deepreload
 
-from models.RSNF import *  # RigidNeuralPrior, NeuralPrior, FreespaceRigidNeuralPrior
+from models.neuralpriors import *  # RigidNeuralPrior, NeuralPrior, FreespaceRigidNeuralPrior
 
 # todo setup everything with ground truth info to know if that helps []
 # todo sceneflow metric for multiple runs []

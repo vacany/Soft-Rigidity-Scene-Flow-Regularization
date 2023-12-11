@@ -1,8 +1,10 @@
-# Functions for our Spatial-Consistency regularizor - enforcing multi-body rigidity via quasi-isometry.
-# Functions in this file are adapted from: https://github.com/ZhiChen902/SC2-PCR
+# Functions in this file are from: https://github.com/ZhiChen902/SC2-PCR
+# Implementation taken from: https://github.com/kavisha725/MBNSF/
+
 
 import torch
 import time
+
 def power_iteration(M, num_iterations=10):
     """
     Calculate the leading eigenvector using power iteration algorithm
@@ -21,6 +23,19 @@ def power_iteration(M, num_iterations=10):
         leading_eig_last = leading_eig
     leading_eig = leading_eig.squeeze(-1)
     return leading_eig
+
+def spatial_consistency_score(M, leading_eig):
+    """
+    Calculate the spatial consistency score based on spectral analysis.
+    Input:
+        - M:          [bs, num_corr, num_corr] the compatibility matrix
+        - leading_eig [bs, num_corr]           the leading eigenvector of matrix M
+    Output:
+        - sc_score
+    """
+    sc_score = leading_eig[:, None, :] @ M @ leading_eig[:, :, None]
+    sc_score = sc_score.squeeze(-1) / M.shape[1]
+    return sc_score
 
 def spatial_consistency_score(M, leading_eig):
     """

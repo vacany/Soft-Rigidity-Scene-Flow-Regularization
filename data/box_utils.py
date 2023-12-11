@@ -3,8 +3,8 @@ import torch
 from shapely.geometry import Polygon, Point
 from scipy.spatial import ConvexHull, Delaunay
 from ops.transform import xyz_rpy_to_matrix
-from vis.mayavi_interactive import draw_coord_frame
-from mayavi import mlab
+# from vis.mayavi_interactive import draw_coord_frame
+# from mayavi import mlab
 
 
 box_colormap = [
@@ -116,17 +116,18 @@ def connect_3d_corners(bboxes, fill_points=10, add_label=None):
     point_list = []
     line = np.linspace(0, 1, fill_points)
 
-    for box in corners:
+    for id, box in enumerate(corners):
         for i in range(len(box)):
             if i != 3 and i != 7:
                 points = box[i] + (box[i + 1] - box[i]) * line[:, None]
-                point_list.append(points)
             if i < 4:
                 points = box[i] + (box[i + 4] - box[i]) * line[:, None]
-                point_list.append(points)
+                # point_list.append(points)
             if i in [3, 7]:
                 points = box[i] + (box[i - 3] - box[i]) * line[:, None]
-                point_list.append(points)
+                # point_list.append(points)
+            points = np.insert(points, 3, id, axis=1)
+            point_list.append(points)
 
     points = np.concatenate(point_list)
     if add_label is not None:

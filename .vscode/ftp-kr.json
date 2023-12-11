@@ -1,0 +1,16 @@
+{
+    "host": "login3.rci.cvut.cz",
+    "username": "vacekpa2",
+    "password": "Coldplay7",
+    "remotePath": "home/vacekpa2",
+    "protocol": "ftp",
+    "port": 0,
+    "fileNameEncoding": "utf8",
+    "autoUpload": true,
+    "autoDelete": false,
+    "autoDownload": false,
+    "ignore": [
+        ".git",
+        "/.vscode"
+    ]
+}

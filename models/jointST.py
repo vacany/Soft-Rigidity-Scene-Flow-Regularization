@@ -8,7 +8,7 @@ from loss.instance import smooth_cluster_ids, gather_flow_ids, center_rigidity_l
 # from lietorch import SE3
 # from pytorch3d.transforms import euler_angles_to_matrix
 # from ops.transform import find_weighted_rigid_alignment
-from models.RSNF import PoseTransform
+from models.neuralpriors import PoseTransform
 
 
 

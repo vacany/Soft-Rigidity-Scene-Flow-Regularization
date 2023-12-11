@@ -5,10 +5,9 @@ import importlib
 import torch.nn.functional as F
 from pytorch3d.ops.knn import knn_points
 from pytorch3d.ops.points_normals import estimate_pointcloud_normals
-from models.MBNSF.utils import sc_utils
+from loss import sc_utils
 from sklearn.cluster import DBSCAN
 
-from data.range_image import VisibilityScene
 try:
     import FastGeodis
 except:
@@ -18,8 +17,15 @@ try:
     from cucim.core.operations import morphology
 except:
     print("Cupy works only on GPU or is not found, will not use it. This is not error, just future work")
-# from .visibility import KNN_visibility_solver, substitute_NN_by_mask, strip_KNN_with_vis
 
+
+
+def mask_NN_by_dist(dist, nn_ind, max_radius):
+    # todo refactor to loss utils
+    tmp_idx = nn_ind[:, :, 0].unsqueeze(2).repeat(1, 1, nn_ind.shape[-1]).to(nn_ind.device)
+    nn_ind[dist > max_radius] = tmp_idx[dist > max_radius]
+
+    return nn_ind
 
 def chamfer_distance_loss(x, y, x_lengths=None, y_lengths=None, both_ways=False, normals_K=0, loss_norm=1):
     '''
@@ -66,8 +72,8 @@ class FastNN(torch.nn.Module):
         # ------------------ Beginning of Init ----------------------- #
         # Hyperparams
         # st = time.time()
-        max_range = cp.array([70., 70., 4.])
-        min_range = cp.array([-70., -70., 0.])
+        max_range = cp.array([20., 20., 4.])
+        min_range = cp.array([-20., -20., -3.])
         self.min_range = min_range
         cell_size = cp.array(cell_size)
         self.cell_size = cell_size
@@ -263,6 +269,13 @@ class DT:
 
 
 class SC2_KNN(torch.nn.Module):
+    
+    ''' Our soft-rigid regularization with neighborhoods
+    pc1 : Point cloud
+    K : Number of NN for the neighborhood
+    use_normals : Whether to use surface estimation for neighborhood construction
+    d_thre : constant for working with the displacements as percentual statistics, we use value from https://github.com/ZhiChen902/SC2-PCR
+    '''
     def __init__(self, pc1, K=16, use_normals=False, d_thre=0.03):
         super().__init__()
         self.d_thre = d_thre
@@ -274,6 +287,7 @@ class SC2_KNN(torch.nn.Module):
             dist, self.kNN, _ = knn_points(pc1, pc1, lengths1=None, lengths2=None, K=K, return_nn=True)
 
         self.src_keypts = pc1[:, self.kNN[:, :, :]]
+
     def forward(self, flow):
 
         target_keypts = self.src_keypts + flow[:, self.kNN[:, :, :]]
@@ -290,124 +304,12 @@ class SC2_KNN(torch.nn.Module):
         loss = - torch.log(score).mean()
 
         return loss
-def _smoothness_loss(est_flow, NN_idx, loss_norm=1, mask=None):
-
-    bs, n, c = est_flow.shape
-
-    if bs > 1:
-        print("Smoothness Maybe not working, needs testing!")
-    K = NN_idx.shape[2]
-
-    est_flow_neigh = est_flow.view(bs * n, c)
-    est_flow_neigh = est_flow_neigh[NN_idx.view(bs * n, K)]
-
-    est_flow_neigh = est_flow_neigh[:, 1:K + 1, :]
-    flow_diff = est_flow.view(bs * n, c) - est_flow_neigh.permute(1, 0, 2)
-
-    flow_diff = (flow_diff).norm(p=loss_norm, dim=2)
-    smooth_flow_loss = flow_diff.mean()
-    smooth_flow_per_point = flow_diff.mean(dim=0).view(bs, n)
-
-    return smooth_flow_loss, smooth_flow_per_point
-
-
-
-def mask_NN_by_dist(dist, nn_ind, max_radius):
-    # todo refactor to loss utils
-    tmp_idx = nn_ind[:, :, 0].unsqueeze(2).repeat(1, 1, nn_ind.shape[-1]).to(nn_ind.device)
-    nn_ind[dist > max_radius] = tmp_idx[dist > max_radius]
-
-    return nn_ind
-def _forward_flow_loss(pc1, pc2, est_flow):
-    ''' not yet for K > 1 or BS > 1
-    Smooth flow on same NN from pc2 '''
-    _, forward_nn, _ = knn_points(pc1 + est_flow, pc2, lengths1=None, lengths2=None, K=1, norm=1)
-
-    a = est_flow[0] # magnitude
-
-    ind = forward_nn[0] # more than one?
-
-    #if pc1 is bigger than pc2, then skip?
-    if pc1.shape[1] < pc2.shape[1]:
-        shape_diff = pc2.shape[1] - ind.shape[0] + 1 # one for dummy    # what if pc1 is bigger than pc2?
-        a = F.pad(a, (0,0,0, shape_diff), mode='constant', value=0)
-        a.retain_grad() # padding does not retain grad, need to do it manually. Check it
-
-        ind = F.pad(ind, (0,0,0, shape_diff), mode='constant', value=pc2.shape[1])  # pad with dummy not in orig
-
-    # storage of same points
-    vec = torch.zeros(ind.shape[0], 3, device=pc1.device)
-
-    vec.scatter_reduce_(0, ind.repeat(1,3), a, reduce='mean', include_self=False)  # will do forward flow
-
-    # loss
-    forward_loss = torch.nn.functional.mse_loss(vec[ind[:,0]], a, reduction='none').mean(dim=-1)
-
-    return forward_loss.mean(), forward_loss[:est_flow.shape[1]]
-
-
-def _forward_smoothness(pc1, pc2, est_flow, NN_pc2=None, K=2, include_pc2_smoothness=True):
-
-    if NN_pc2 is None and include_pc2_smoothness:
-        # Compute NN_pc2
-        print('Computing NN_pc2')
-        _, NN_pc2, _ = knn_points(pc2, pc2, lengths1=None, lengths2=None, K=K, norm=1)
-
-
-    _, forward_nn, _ = knn_points(pc1 + est_flow, pc2, lengths1=None, lengths2=None, K=1, norm=1)
-
-    a = est_flow[0] # magnitude
-
-    ind = forward_nn[0] # more than one?
-
-    if pc1.shape[1] < pc2.shape[1]:
-        shape_diff = pc2.shape[1] - ind.shape[0] + 1 # one for dummy    # what if pc1 is bigger than pc2?
-        a = F.pad(a, (0,0,0, shape_diff), mode='constant', value=0)
-        a.retain_grad() # padding does not retain grad, need to do it manually. Check it
-
-        ind = F.pad(ind, (0,0,0, shape_diff), mode='constant', value=pc2.shape[1])  # pad with dummy not in orig
-
-    # storage of same points
-    vec = torch.zeros(ind.shape[0], 3, device=pc1.device)
-
-    # this is forward flow withnout NN_pc2 smoothness
-    vec = vec.scatter_reduce_(0, ind.repeat(1,3), a, reduce='mean', include_self=False)
-
-    forward_flow_loss = torch.nn.functional.mse_loss(vec[ind[:,0]], a, reduction='none').mean(dim=-1)
-
-    if include_pc2_smoothness:
-        # rest is pc2 smoothness with pre-computed NN
-        keep_ind = ind[ind[:,0] != pc2.shape[1] ,0]
-
-        # znamena, ze est flow body maji tyhle indexy pro body v pc2 a ty indexy maji mit stejne flow.
-        n = NN_pc2[0, keep_ind, :]
-
-        # beware of zeros!!!
-        connected_flow = vec[n] # N x KSmooth x 3 (fx, fy, fz)
-
-        prep_flow = est_flow[0].unsqueeze(1).repeat_interleave(repeats=K, dim=1) # correct
-
-        # smooth it, should be fine
-        flow_diff = prep_flow - connected_flow  # correct operation, but zeros makes problem
-
-        occupied_mask = connected_flow.all(dim=2).repeat(3,1,1).permute(1,2,0)
-
-        # occupied_mask
-        per_flow_dim_diff = torch.masked_select(flow_diff, occupied_mask)
-
-        # per_point_loss = per_flow_dim_diff.norm(dim=-1).mean()
-        NN_pc2_loss = (per_flow_dim_diff ** 2).mean()    # powered to 2 because norm will sum it directly
-
-    else:
-        NN_pc2_loss = torch.tensor(0.)
-
-    return forward_flow_loss.mean(), forward_flow_loss, NN_pc2_loss
-
-
 
 
 
 class MBSC(torch.nn.Module):
+    # Implementation of https://github.com/kavisha725/MBNSF/
+    # Spatial-consistency isometry based on DBSCAN clusters with fixed parameters
     def __init__(self, pc1, eps=0.8, min_samples=30):
         super().__init__()
         self.pc1 = pc1
@@ -598,267 +500,240 @@ class GeneralLoss(torch.nn.Module):
 
         return forward_loss, forward_flow_loss
 
-class VAChamferLoss(torch.nn.Module):
+# class VAChamferLoss(torch.nn.Module):
 
-    def __init__(self, pc2, fov_up, fov_down, H, W, max_range, pc_scene=None, nn_weight=1, max_radius=2, both_ways=False, free_weight=0, margin=0.001, ch_normals_K=0, **kwargs):
-        super().__init__()
-        self.kwargs = kwargs
-        self.pc2 = pc2
-        self.pc_scene = pc_scene if pc_scene is not None else pc2
+#     def __init__(self, pc2, fov_up, fov_down, H, W, max_range, pc_scene=None, nn_weight=1, max_radius=2, both_ways=False, free_weight=0, margin=0.001, ch_normals_K=0, **kwargs):
+#         super().__init__()
+#         self.kwargs = kwargs
+#         self.pc2 = pc2
+#         self.pc_scene = pc_scene if pc_scene is not None else pc2
 
 
-        # todo option of "pushing" points out of the freespace
-        self.fov_up = fov_up
-        self.fov_down = fov_down
-        self.H = H
-        self.W = W
-        self.max_range = max_range
-        self.margin = margin
-        self.free_weight = free_weight
+#         # todo option of "pushing" points out of the freespace
+#         self.fov_up = fov_up
+#         self.fov_down = fov_down
+#         self.H = H
+#         self.W = W
+#         self.max_range = max_range
+#         self.margin = margin
+#         self.free_weight = free_weight
 
-        # NN component
-        self.normals_K = ch_normals_K
-        self.nn_weight = nn_weight
-        self.nn_max_radius = max_radius
-        self.both_ways = both_ways
+#         # NN component
+#         self.normals_K = ch_normals_K
+#         self.nn_weight = nn_weight
+#         self.nn_max_radius = max_radius
+#         self.both_ways = both_ways
 
-        # torch.use_deterministic_algorithms(mode=True, warn_only=False)  # this ...
-        # pc2_depth, idx_w, idx_h, inside_range_img = range_image_coords(pc2[0], fov_up, fov_down, proj_H, proj_W)
+#         # torch.use_deterministic_algorithms(mode=True, warn_only=False)  # this ...
+#         # pc2_depth, idx_w, idx_h, inside_range_img = range_image_coords(pc2[0], fov_up, fov_down, proj_H, proj_W)
 
-        # self.range_depth = create_depth_img(pc2_depth, idx_w, idx_h, proj_H, proj_W, inside_range_img)
-        # torch.use_deterministic_algorithms(mode=False, warn_only=False)  # this ...
+#         # self.range_depth = create_depth_img(pc2_depth, idx_w, idx_h, proj_H, proj_W, inside_range_img)
+#         # torch.use_deterministic_algorithms(mode=False, warn_only=False)  # this ...
 
-    def forward(self, pc1, est_flow, pc2=None):
-        '''
+#     def forward(self, pc1, est_flow, pc2=None):
+#         '''
 
-        Args:
-            pc1:
-            est_flow:
+#         Args:
+#             pc1:
+#             est_flow:
 
-        Returns:
-        mask whether the deformed point cloud is in freespace visibility area
-        '''
-        # dynamic
+#         Returns:
+#         mask whether the deformed point cloud is in freespace visibility area
+#         '''
+#         # dynamic
 
-        # assign Kabsch to lonely points or just push them out of freespace?
-        # precompute chamfer, radius
-        chamf_x, chamf_y = self.chamfer_distance_loss(pc1 + est_flow, self.pc2, both_ways=self.both_ways, normals_K=self.normals_K)
+#         # assign Kabsch to lonely points or just push them out of freespace?
+#         # precompute chamfer, radius
+#         chamf_x, chamf_y = self.chamfer_distance_loss(pc1 + est_flow, self.pc2, both_ways=self.both_ways, normals_K=self.normals_K)
 
-        if self.free_weight > 0:
-            freespace_loss = self.flow_freespace_loss(pc1, est_flow, chamf_x)
+#         if self.free_weight > 0:
+#             freespace_loss = self.flow_freespace_loss(pc1, est_flow, chamf_x)
 
-        else:
-            freespace_loss = torch.zeros_like(chamf_x, dtype=torch.float32, device=chamf_x.device)
+#         else:
+#             freespace_loss = torch.zeros_like(chamf_x, dtype=torch.float32, device=chamf_x.device)
 
-        chamf_loss = self.nn_weight * (chamf_x.mean() + chamf_y.mean()) + self.free_weight * freespace_loss.mean()
+#         chamf_loss = self.nn_weight * (chamf_x.mean() + chamf_y.mean()) + self.free_weight * freespace_loss.mean()
 
-        return chamf_loss, freespace_loss
+#         return chamf_loss, freespace_loss
 
 
-    def chamfer_distance_loss(self, x, y, x_lengths=None, y_lengths=None, both_ways=False, normals_K=0, loss_norm=1):
-        '''
-        Unique Nearest Neighboors?
-        :param x:
-        :param y:
-        :param x_lengths:
-        :param y_lengths:
-        :param reduction:
-        :return:
-        '''
-        if normals_K >= 3:
-            normals1 = estimate_pointcloud_normals(x, neighborhood_size=normals_K)
-            normals2 = estimate_pointcloud_normals(y, neighborhood_size=normals_K)
+#     def chamfer_distance_loss(self, x, y, x_lengths=None, y_lengths=None, both_ways=False, normals_K=0, loss_norm=1):
+#         '''
+#         Unique Nearest Neighboors?
+#         :param x:
+#         :param y:
+#         :param x_lengths:
+#         :param y_lengths:
+#         :param reduction:
+#         :return:
+#         '''
+#         if normals_K >= 3:
+#             normals1 = estimate_pointcloud_normals(x, neighborhood_size=normals_K)
+#             normals2 = estimate_pointcloud_normals(y, neighborhood_size=normals_K)
 
-            x = torch.cat([x, normals1], dim=-1)
-            y = torch.cat([y, normals2], dim=-1)
+#             x = torch.cat([x, normals1], dim=-1)
+#             y = torch.cat([y, normals2], dim=-1)
 
 
-        x_nn = knn_points(x, y, lengths1=x_lengths, lengths2=y_lengths, K=1, norm=loss_norm)
-        cham_x = x_nn.dists[..., 0]  # (N, P1)
-        # x_nearest_to_y = x_nn[1]
+#         x_nn = knn_points(x, y, lengths1=x_lengths, lengths2=y_lengths, K=1, norm=loss_norm)
+#         cham_x = x_nn.dists[..., 0]  # (N, P1)
+#         # x_nearest_to_y = x_nn[1]
 
-        if both_ways:
-            y_nn = knn_points(y, x, lengths1=y_lengths, lengths2=x_lengths, K=1, norm=loss_norm)
-            cham_y = y_nn.dists[..., 0]  # (N, P2)
-            # y_nearest_to_x = y_nn[1]
-        else:
+#         if both_ways:
+#             y_nn = knn_points(y, x, lengths1=y_lengths, lengths2=x_lengths, K=1, norm=loss_norm)
+#             cham_y = y_nn.dists[..., 0]  # (N, P2)
+#             # y_nearest_to_x = y_nn[1]
+#         else:
 
-            cham_y = torch.tensor(0, dtype=torch.float32, device=x.device)
+#             cham_y = torch.tensor(0, dtype=torch.float32, device=x.device)
 
-        return cham_x, cham_y
+#         return cham_x, cham_y
 
-    def flow_freespace_loss(self, pc1, est_flow, chamf_x):
+#     def flow_freespace_loss(self, pc1, est_flow, chamf_x):
 
-        # flow_depth, flow_w, flow_h, flow_inside = self.Visibility.generate_range_coors(pc1 + est_flow)
-        pc2_image_depth = self.Visibility.assign_depth_to_flow((pc1 + est_flow)[0])
-        flow_depth = ((pc1+est_flow)[0]).norm(dim=-1)
+#         # flow_depth, flow_w, flow_h, flow_inside = self.Visibility.generate_range_coors(pc1 + est_flow)
+#         pc2_image_depth = self.Visibility.assign_depth_to_flow((pc1 + est_flow)[0])
+#         flow_depth = ((pc1+est_flow)[0]).norm(dim=-1)
 
-            # use it only for flow inside the image
-        # masked_pc2_depth = self.range_depth[flow_h[flow_inside], flow_w[flow_inside]]
-        compared_depth = pc2_image_depth - flow_depth
+#             # use it only for flow inside the image
+#         # masked_pc2_depth = self.range_depth[flow_h[flow_inside], flow_w[flow_inside]]
+#         compared_depth = pc2_image_depth - flow_depth
 
 
 
-        # if flow point before the visible point from pc2, then it is in freespace
-        # margin is just little number to not push points already close to visible point
-        flow_in_freespace = compared_depth > 0 + self.margin
+#         # if flow point before the visible point from pc2, then it is in freespace
+#         # margin is just little number to not push points already close to visible point
+#         flow_in_freespace = compared_depth > 0 + self.margin
 
 
-        # Indexing flow in freespace
-        # freespace_mask = torch.zeros_like(chamf_x, dtype=torch.bool)[0]
-        # freespace_mask = flow_in_freespace
-        # if repel:
-        freespace_loss = - est_flow[0, flow_in_freespace].norm(dim=-1).mean()
+#         # Indexing flow in freespace
+#         # freespace_mask = torch.zeros_like(chamf_x, dtype=torch.bool)[0]
+#         # freespace_mask = flow_in_freespace
+#         # if repel:
+#         freespace_loss = - est_flow[0, flow_in_freespace].norm(dim=-1).mean()
 
-        # freespace_loss = flow_in_freespace * chamf_x
+#         # freespace_loss = flow_in_freespace * chamf_x
 
-        return freespace_loss
+#         return freespace_loss
 
 
-# datainfo
-class LossModule(torch.nn.Module):
 
-    def __init__(self, **kwargs):
-        super().__init__()
-        self.kwargs = kwargs
 
-        if kwargs['dataset'] in ['kitti_t', 'kitti_o']:
-            # range function
-            pass
 
-    def update(self, pc1, pc2):
-        if hasattr(self, 'pc_scene'):
-            self.VAChamfer_loss = VAChamferLoss(pc2=pc2, pc_scene=self.pc_scene, **self.kwargs)
-        else:
-            self.VAChamfer_loss = VAChamferLoss(pc2=pc2, **self.kwargs)
+# class _old_FastNN(torch.nn.Module):
+#     def __init__(self, max_radius=2, max_z_diff=0.2, cell_size=0.1, max_range=200, device='cuda:0'):
+#         super().__init__()
 
+#         with torch.no_grad():
+#             cell_size = torch.tensor(cell_size, device=device)
+#             self.cell_size = cell_size
+#             voxel_size = (cell_size, cell_size, cell_size)
+#             self.voxel_size = voxel_size
 
-        self.Smoothness_loss = SmoothnessLoss(pc1, pc2, **self.kwargs)
+#             range_x, range_y, range_z = max_range, max_range, max_range / 4
+#             self.size = (int(range_x / voxel_size[0]), int(range_y / voxel_size[1]), int(range_z / voxel_size[2]))
+#             self.mid = torch.tensor([self.size[0] / 2, self.size[1] / 2, self.size[2] / 2], device=device, dtype=torch.long)
+#             self.voxel_grid = - torch.ones(self.size, device=device, dtype=torch.long)
 
-    def forward(self, pc1, est_flow, pc2):
+#             self.max_radius = torch.tensor(max_radius, device=device)
+#             self.max_z_diff = torch.tensor(max_z_diff, device=device)
+#             self.device = device
+#             inter = int(max_radius / cell_size) + 1
+#             # inter_z = int(max_radius_z / cell_size) + 1
 
-        chamf_loss, pp_freespace_loss = self.VAChamfer_loss(pc1, est_flow)
-        smooth_loss = self.Smoothness_loss(pc1, est_flow, pc2)
+#             max_ring_idx = int(max_radius / cell_size) + 1
 
-        loss = smooth_loss + chamf_loss
-        # todo save losses
-        return loss
+#             added_balls_x = torch.linspace(-max_radius - 1, max_radius + 1, 5 * inter, device=device)
+#             added_balls_y = torch.linspace(-max_radius - 1, max_radius + 1, 5 * inter, device=device)
+#             added_balls_z = torch.linspace(-max_radius - 1, max_radius + 1, 5 * inter, device=device)
 
+#             ball_points = torch.cartesian_prod(added_balls_x, added_balls_y, added_balls_z)
+#             ball_dist = ball_points.norm(dim=1)
+#             ball_points = torch.cat((ball_points, ball_dist.unsqueeze(1)), dim=1)
 
-class _old_FastNN(torch.nn.Module):
-    def __init__(self, max_radius=2, max_z_diff=0.2, cell_size=0.1, max_range=200, device='cuda:0'):
-        super().__init__()
+#             dist_mask = ball_points[:, -1] <= max_radius
 
-        with torch.no_grad():
-            cell_size = torch.tensor(cell_size, device=device)
-            self.cell_size = cell_size
-            voxel_size = (cell_size, cell_size, cell_size)
-            self.voxel_size = voxel_size
+#             ball_points = ball_points[dist_mask]
+#             subsampling_voxel = torch.zeros((500, 500, 100), device=device)
+#             subsampling_voxel[(ball_points[:, 0] / cell_size + 250).to(torch.long),
+#             (ball_points[:, 1] / cell_size + 250).to(torch.long),
+#             (ball_points[:, 2] / cell_size + 50).to(torch.long)] = 1
 
-            range_x, range_y, range_z = max_range, max_range, max_range / 4
-            self.size = (int(range_x / voxel_size[0]), int(range_y / voxel_size[1]), int(range_z / voxel_size[2]))
-            self.mid = torch.tensor([self.size[0] / 2, self.size[1] / 2, self.size[2] / 2], device=device, dtype=torch.long)
-            self.voxel_grid = - torch.ones(self.size, device=device, dtype=torch.long)
+#             survived_pts = subsampling_voxel.nonzero()
+#             survived_pts = (survived_pts - torch.tensor([250, 250, 50], device=device)) * cell_size
+#             dist_survived = survived_pts.norm(dim=1)
 
-            self.max_radius = torch.tensor(max_radius, device=device)
-            self.max_z_diff = torch.tensor(max_z_diff, device=device)
-            self.device = device
-            inter = int(max_radius / cell_size) + 1
-            # inter_z = int(max_radius_z / cell_size) + 1
+#             processed_ball_points = torch.cat(
+#                     (survived_pts, dist_survived.unsqueeze(1), torch.zeros_like(dist_survived.unsqueeze(1))), dim=1)
 
-            max_ring_idx = int(max_radius / cell_size) + 1
+#             self.idx_dict = {}
+#             for dist_idx, dist in enumerate(torch.unique(processed_ball_points[:, 3])):
+#                 mask = (processed_ball_points[:, 3] == dist) & (torch.abs(processed_ball_points[:, 2]) < max_z_diff)
+#                 processed_ball_points[mask, 4] = dist_idx
 
-            added_balls_x = torch.linspace(-max_radius - 1, max_radius + 1, 5 * inter, device=device)
-            added_balls_y = torch.linspace(-max_radius - 1, max_radius + 1, 5 * inter, device=device)
-            added_balls_z = torch.linspace(-max_radius - 1, max_radius + 1, 5 * inter, device=device)
+#                 add_ball = torch.cat(
+#                         (processed_ball_points[mask, :3], torch.zeros_like(processed_ball_points[mask, :1])), dim=1)
+#                 self.idx_dict[dist_idx] = add_ball
 
-            ball_points = torch.cartesian_prod(added_balls_x, added_balls_y, added_balls_z)
-            ball_dist = ball_points.norm(dim=1)
-            ball_points = torch.cat((ball_points, ball_dist.unsqueeze(1)), dim=1)
+#             del subsampling_voxel
 
-            dist_mask = ball_points[:, -1] <= max_radius
+#     def update_pointcloud(self, points):
 
-            ball_points = ball_points[dist_mask]
-            subsampling_voxel = torch.zeros((500, 500, 100), device=device)
-            subsampling_voxel[(ball_points[:, 0] / cell_size + 250).to(torch.long),
-            (ball_points[:, 1] / cell_size + 250).to(torch.long),
-            (ball_points[:, 2] / cell_size + 50).to(torch.long)] = 1
+#         del self.voxel_grid
 
-            survived_pts = subsampling_voxel.nonzero()
-            survived_pts = (survived_pts - torch.tensor([250, 250, 50], device=device)) * cell_size
-            dist_survived = survived_pts.norm(dim=1)
+#         with torch.no_grad():
+#             self.voxel_grid = - torch.ones(self.size, device=self.device, dtype=torch.long)
+#             pc = points
+#             pc = torch.cat((pc, torch.zeros_like(pc[..., :1])), dim=2)
+#             pc[..., -1] = torch.arange(len(pc[0]))  # assign index
 
-            processed_ball_points = torch.cat(
-                    (survived_pts, dist_survived.unsqueeze(1), torch.zeros_like(dist_survived.unsqueeze(1))), dim=1)
+#             for dist_idx in range(len(self.idx_dict) - 1, -1, -1):
+#                 ball_points = self.idx_dict[dist_idx]
 
-            self.idx_dict = {}
-            for dist_idx, dist in enumerate(torch.unique(processed_ball_points[:, 3])):
-                mask = (processed_ball_points[:, 3] == dist) & (torch.abs(processed_ball_points[:, 2]) < max_z_diff)
-                processed_ball_points[mask, 4] = dist_idx
+#                 # print(pc.shape, ball_points.shape)
+#                 # broadcast pc and ball_points
 
-                add_ball = torch.cat(
-                        (processed_ball_points[mask, :3], torch.zeros_like(processed_ball_points[mask, :1])), dim=1)
-                self.idx_dict[dist_idx] = add_ball
+#                 extended_pc = pc[0] + ball_points.unsqueeze(1)
 
-            del subsampling_voxel
+#                 # ball_points to voxel coordinates
+#                 # ball_points = (ball_points / cell_size).to(torch.long)
+#                 # full_pc = torch.cat((extended_pc, ))
+#                 full_pc = extended_pc.view(-1, 4)
+#                 # print(full_pc.shape, self.mid.shape)
+#                 full_pc[:, :3] = (full_pc[:, :3] / self.cell_size)
 
-    def update_pointcloud(self, points):
+#                 # print(full_pc[:, :3].min(), full_pc[:, :3].max())
 
-        del self.voxel_grid
+#                 # transfer full_pc point cloud to voxel grid cells
+#                 # full_coors = torch.stack((full_pc[..., 0] / cell_size, full_pc[..., 1] / cell_size, full_pc[..., 2] / cell_size, torch.full_like(full_pc[..., 2],1)), dim=2).to(torch.long)
+#                 # full_coors = full_coors.reshape(-1, 4)
+#                 idx = full_pc[..., :].to(torch.long)
+#                 idx[:, :3] += self.mid
+#                 # if len(idx) > 0:
+#                 #     print(idx[:,:3].max(), idx[:,:3].min())
 
-        with torch.no_grad():
-            self.voxel_grid = - torch.ones(self.size, device=self.device, dtype=torch.long)
-            pc = points
-            pc = torch.cat((pc, torch.zeros_like(pc[..., :1])), dim=2)
-            pc[..., -1] = torch.arange(len(pc[0]))  # assign index
+#                 self.voxel_grid[idx[:, 0], idx[:, 1], idx[:, 2]] = idx[:, 3]
 
-            for dist_idx in range(len(self.idx_dict) - 1, -1, -1):
-                ball_points = self.idx_dict[dist_idx]
+#             # del full_pc, idx, extended_pc#, self.idx_dict
+#             # torch.cuda.empty_cache()
 
-                # print(pc.shape, ball_points.shape)
-                # broadcast pc and ball_points
+#     def forward(self, pc1, pred_flow, pc2):
+#         with torch.no_grad():
+#             flow_voxel_indices = ((pc1 + pred_flow) / self.cell_size).to(torch.long) + self.mid
+#             point_mask = (flow_voxel_indices[..., 0] >= 0) & (flow_voxel_indices[..., 0] < self.size[0]) & (
+#                          flow_voxel_indices[..., 1] >= 0) & (flow_voxel_indices[..., 1] < self.size[1]) & (
+#                          flow_voxel_indices[..., 2] >= 0) & (flow_voxel_indices[..., 2] < self.size[2])
 
-                extended_pc = pc[0] + ball_points.unsqueeze(1)
+#             point_mask = point_mask[0]
+#             # print(point_mask.shape, flow_voxel_indices.shape)
 
-                # ball_points to voxel coordinates
-                # ball_points = (ball_points / cell_size).to(torch.long)
-                # full_pc = torch.cat((extended_pc, ))
-                full_pc = extended_pc.view(-1, 4)
-                # print(full_pc.shape, self.mid.shape)
-                full_pc[:, :3] = (full_pc[:, :3] / self.cell_size)
+#             NN_ind = - torch.ones((pc1.shape[1]), device=self.device, dtype=torch.long)
+#             NN_ind[point_mask] = self.voxel_grid[flow_voxel_indices[0, point_mask, 0], flow_voxel_indices[0, point_mask, 1], flow_voxel_indices[0, point_mask, 2]]
 
-                # print(full_pc[:, :3].min(), full_pc[:, :3].max())
+#             # Do not forget about the mask
+#             mask = (NN_ind != -1)
+#             # for bs = 1 for now
+#         # dist = torch.zeros_like(pred_flow[0, :, 0], device=self.device)
+#         dist = (pc2[0, NN_ind[mask]] - (pc1[0][mask] + pred_flow[0][mask])).norm(dim=1)
 
-                # transfer full_pc point cloud to voxel grid cells
-                # full_coors = torch.stack((full_pc[..., 0] / cell_size, full_pc[..., 1] / cell_size, full_pc[..., 2] / cell_size, torch.full_like(full_pc[..., 2],1)), dim=2).to(torch.long)
-                # full_coors = full_coors.reshape(-1, 4)
-                idx = full_pc[..., :].to(torch.long)
-                idx[:, :3] += self.mid
-                # if len(idx) > 0:
-                #     print(idx[:,:3].max(), idx[:,:3].min())
-
-                self.voxel_grid[idx[:, 0], idx[:, 1], idx[:, 2]] = idx[:, 3]
-
-            # del full_pc, idx, extended_pc#, self.idx_dict
-            # torch.cuda.empty_cache()
-
-    def forward(self, pc1, pred_flow, pc2):
-        with torch.no_grad():
-            flow_voxel_indices = ((pc1 + pred_flow) / self.cell_size).to(torch.long) + self.mid
-            point_mask = (flow_voxel_indices[..., 0] >= 0) & (flow_voxel_indices[..., 0] < self.size[0]) & (
-                         flow_voxel_indices[..., 1] >= 0) & (flow_voxel_indices[..., 1] < self.size[1]) & (
-                         flow_voxel_indices[..., 2] >= 0) & (flow_voxel_indices[..., 2] < self.size[2])
-
-            point_mask = point_mask[0]
-            # print(point_mask.shape, flow_voxel_indices.shape)
-
-            NN_ind = - torch.ones((pc1.shape[1]), device=self.device, dtype=torch.long)
-            NN_ind[point_mask] = self.voxel_grid[flow_voxel_indices[0, point_mask, 0], flow_voxel_indices[0, point_mask, 1], flow_voxel_indices[0, point_mask, 2]]
-
-            # Do not forget about the mask
-            mask = (NN_ind != -1)
-            # for bs = 1 for now
-        # dist = torch.zeros_like(pred_flow[0, :, 0], device=self.device)
-        dist = (pc2[0, NN_ind[mask]] - (pc1[0][mask] + pred_flow[0][mask])).norm(dim=1)
-
-        return dist, NN_ind
+#         return dist, NN_ind
